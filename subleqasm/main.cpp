@@ -139,7 +139,7 @@ bool parseArg(std::string_view& text, Arg& arg, int64_t line_number) {
 }
 
 
-bool parseInstruction(std::string_view& text, int64_t line_number) {
+bool parseSubleqInstruction(std::string_view& text, int64_t line_number) {
   Word word;
   word.source_line = line_number;
   word.is_code = true;
@@ -148,6 +148,23 @@ bool parseInstruction(std::string_view& text, int64_t line_number) {
   is_ok = is_ok && parseArg(text, word.arg[1], line_number);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
   is_ok = is_ok && parseArg(text, word.arg[2], line_number);
+  if (is_ok) {
+    code.push_back(word);
+  } else {
+    std::cerr << "Error: Can't parse instruction arguments at line " << line_number << std::endl;
+  }
+  return is_ok;
+}
+
+bool parseSubInstruction(std::string_view& text, int64_t line_number) {
+  Word word;
+  word.source_line = line_number;
+  word.is_code = true;
+  bool is_ok = parseArg(text, word.arg[0], line_number);
+  is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
+  is_ok = is_ok && parseArg(text, word.arg[1], line_number);
+  word.arg[2].is_immediate = true;
+  word.arg[2].immediate = code.size() + 1;
   if (is_ok) {
     code.push_back(word);
   } else {
@@ -264,7 +281,13 @@ bool parseLine(std::string_view line, int64_t line_number) {
   if (startsWith(line, "SUBLEQ")) {
     line.remove_prefix(6);
     consumeWhitespace(line);
-    if (!parseInstruction(line, line_number)) {
+    if (!parseSubleqInstruction(line, line_number)) {
+      return false;
+    }
+  } else if (startsWith(line, "SUB")) {
+    line.remove_prefix(3);
+    consumeWhitespace(line);
+    if (!parseSubInstruction(line, line_number)) {
       return false;
     }
   } else if (startsWith(line, "DW")) {
