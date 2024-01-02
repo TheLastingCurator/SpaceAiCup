@@ -1,0 +1,6 @@
+
+*.app
+*.cmake
+/subleqasm/Makefile
+/subleqasm/CMakeFiles
+CMakeCache.txt

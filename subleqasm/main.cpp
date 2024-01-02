@@ -6,25 +6,15 @@
 #include <unordered_map>
 #include <vector>
 
-#define RAM_BITS 14
-#define RAM_SIZE (1<<RAM_BITS)
-#define RAM_MASK (RAM_SIZE-1)
-
-std::unordered_map<std::string, int64_t> symbol_map;
-std::vector<int64_t> symbol_to_addr;
-
-struct Arg {
+struct Word {
+  int64_t source_line;
   bool is_immediate = false;
   int64_t immediate = 0;
   int64_t symbol_id = -1;
 };
 
-struct Word {
-  int64_t source_line;
-  bool is_code;
-  Arg arg[3];
-};
-
+std::unordered_map<std::string, int64_t> symbol_map;
+std::vector<int64_t> symbol_to_addr;
 std::vector<Word> code;
 
 bool isDigit(char ch) {
@@ -60,11 +50,12 @@ bool consumeComa(std::string_view& text) {
   return false;
 }
 
-void trimComment(std::string_view& text) {
-  size_t commentStart = text.find(';');
-  if (commentStart != std::string_view::npos) {
-    text.remove_suffix(text.size() - commentStart);
+bool consumeComment(std::string_view& text) {
+  if (text.empty() || text.front() != ';') {
+    return false;
   }
+  text = std::string_view();
+  return true;
 }
 
 int64_t SymbolToId(const std::string& str) {
@@ -122,15 +113,17 @@ bool tryParseIdentifier(std::string_view& text, std::string& outIdentifier) {
   return true;
 }
 
-bool parseArg(std::string_view& text, Arg& arg, int64_t line_number) {
+bool parseArg(std::string_view& text, Word& word, int64_t line_number) {
+  word.source_line = line_number;
   uint64_t number;
   std::string identifier;
   if (tryParseInteger(text, number)) {
-    arg.is_immediate = true;
-    arg.immediate = number;
+    word.is_immediate = true;
+    word.immediate = number;
     return true;
   } else if (tryParseIdentifier(text, identifier)) {
-    arg.symbol_id = SymbolToId(identifier);
+    word.is_immediate = false;
+    word.symbol_id = SymbolToId(identifier);
     return true;
   } else {
     std::cerr << "Error: Expected argument at line " << line_number << std::endl;
@@ -140,16 +133,16 @@ bool parseArg(std::string_view& text, Arg& arg, int64_t line_number) {
 
 
 bool parseSubleqInstruction(std::string_view& text, int64_t line_number) {
-  Word word;
-  word.source_line = line_number;
-  word.is_code = true;
-  bool is_ok = parseArg(text, word.arg[0], line_number);
+  Word word[3];
+  bool is_ok = parseArg(text, word[0], line_number);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word.arg[1], line_number);
+  is_ok = is_ok && parseArg(text, word[1], line_number);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word.arg[2], line_number);
+  is_ok = is_ok && parseArg(text, word[2], line_number);
   if (is_ok) {
-    code.push_back(word);
+    code.push_back(word[0]);
+    code.push_back(word[1]);
+    code.push_back(word[2]);
   } else {
     std::cerr << "Error: Can't parse instruction arguments at line " << line_number << std::endl;
   }
@@ -157,16 +150,17 @@ bool parseSubleqInstruction(std::string_view& text, int64_t line_number) {
 }
 
 bool parseSubInstruction(std::string_view& text, int64_t line_number) {
-  Word word;
-  word.source_line = line_number;
-  word.is_code = true;
-  bool is_ok = parseArg(text, word.arg[0], line_number);
+  Word word[3];
+  bool is_ok = parseArg(text, word[0], line_number);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word.arg[1], line_number);
-  word.arg[2].is_immediate = true;
-  word.arg[2].immediate = code.size() + 1;
+  is_ok = is_ok && parseArg(text, word[1], line_number);
+  word[2].source_line = line_number;
+  word[2].is_immediate = true;
+  word[2].immediate = code.size()*64 + 3;
   if (is_ok) {
-    code.push_back(word);
+    code.push_back(word[0]);
+    code.push_back(word[1]);
+    code.push_back(word[2]);
   } else {
     std::cerr << "Error: Can't parse instruction arguments at line " << line_number << std::endl;
   }
@@ -191,8 +185,8 @@ bool tryParseLabel(std::string_view& text, std::string& outLabel) {
 
 bool parseDW(std::string_view& text, int64_t line_number) {
   consumeWhitespace(text);
+  consumeComment(text);
   while (!text.empty()) {
-    consumeWhitespace(text);
     if (text.front() == '\'' || text.front() == '\"') {
       char delimiter = text.front();
       text.remove_prefix(1);
@@ -203,9 +197,8 @@ bool parseDW(std::string_view& text, int64_t line_number) {
         }
         Word word;
         word.source_line = line_number;
-        word.is_code = false;
-        word.arg[0].is_immediate = true;
-        word.arg[0].immediate = static_cast<uint64_t>(text.front());
+        word.is_immediate = true;
+        word.immediate = static_cast<uint64_t>(text.front());
         code.push_back(word);
         text.remove_prefix(1);
       }
@@ -219,14 +212,13 @@ bool parseDW(std::string_view& text, int64_t line_number) {
       std::string identifier;
       Word word;
       word.source_line = line_number;
-      word.is_code = false;
       if (tryParseInteger(text, value)) {
-        word.arg[0].is_immediate = true;
-        word.arg[0].immediate = value;
+        word.is_immediate = true;
+        word.immediate = value;
         code.push_back(word);
       } else if (tryParseIdentifier(text, identifier)) {
-        word.arg[0].is_immediate = false;
-        word.arg[0].symbol_id = SymbolToId(identifier);
+        word.is_immediate = false;
+        word.symbol_id = SymbolToId(identifier);
         code.push_back(word);
       } else {
         std::cerr << "Error: Invalid word value at line " << line_number << '\n';
@@ -235,6 +227,8 @@ bool parseDW(std::string_view& text, int64_t line_number) {
     }
     consumeWhitespace(text);
     consumeComa(text);
+    consumeWhitespace(text);
+    consumeComment(text);
   }
   return true;
 }
@@ -247,16 +241,19 @@ bool parseORG(std::string_view& text, int64_t line_number) {
     std::cerr << "Error: Unable to parse address in ORG directive at line " << line_number << '\n';
     return false;
   }
-  if (address < code.size()) {
-    std::cerr << "Error: ORG address is less than current code size at line " << line_number << '\n';
+  if (address < code.size() * 64) {
+    std::cerr << "Error: ORG address (" << address << ") is less than current code size (" << code.size()*64 << ") at line " << line_number << '\n';
+    return false;
+  }
+  if (address % 64) {
+    std::cerr << "Error: ORG address (" << address << ") is not a multipe of 64 at line " << line_number << '\n';
     return false;
   }
   Word word;
   word.source_line = line_number;
-  word.is_code = false;
-  word.arg[0].is_immediate = true;
-  word.arg[0].immediate = 0;
-  while (code.size() < address) {
+  word.is_immediate = true;
+  word.immediate = 0;
+  while (code.size()*64 < address) {
     code.push_back(word);
   }
   return true;
@@ -271,11 +268,10 @@ bool startsWith(const std::string_view& text, const std::string_view& prefix) {
 }
 
 bool parseLine(std::string_view line, int64_t line_number) {
-  trimComment(line);
   consumeWhitespace(line);
   std::string label;
   if (tryParseLabel(line, label)) {
-    symbol_to_addr[SymbolToId(label)] = static_cast<int64_t>(code.size());
+    symbol_to_addr[SymbolToId(label)] = static_cast<int64_t>(code.size())*64;
   }
   consumeWhitespace(line);
   if (startsWith(line, "SUBLEQ")) {
@@ -304,6 +300,7 @@ bool parseLine(std::string_view line, int64_t line_number) {
     }
   }
   consumeWhitespace(line);
+  consumeComment(line);
   if (line.size() > 0) {
     std::cerr << "Error: Unexpected tokens at line " << line_number << std::endl;
       return false;
@@ -314,21 +311,10 @@ bool parseLine(std::string_view line, int64_t line_number) {
 bool CheckAddr() {
   for (size_t address = 0; address < code.size(); ++address) {
     const auto& word = code[address];
-    if (word.is_code) {
-      for (size_t i = 0; i < 3; ++i) {
-        if (!word.arg[i].is_immediate) {
-          if (symbol_to_addr[word.arg[i].symbol_id] < 0) {
-            std::cerr << "Error: Undefined symbol at line " << word.source_line << '\n';
-            return false;
-          }
-        }
-      }
-    } else {
-      if (!word.arg[0].is_immediate) {
-        if (symbol_to_addr[word.arg[0].symbol_id] < 0) {
-          std::cerr << "Error: Undefined symbol at line " << word.source_line << '\n';
-          return false;
-        }
+    if (!word.is_immediate) {
+      if (symbol_to_addr[word.symbol_id] < 0) {
+        std::cerr << "Error: Undefined symbol at line " << word.source_line << '\n';
+        return false;
       }
     }
   }
@@ -336,26 +322,12 @@ bool CheckAddr() {
 }
 
 void EmitBinaryCode(std::ofstream &out) {
-  for (size_t address = 0; address < code.size(); ++address) {
-    const auto& word = code[address];
-    if (word.is_code) {
-      uint64_t a = word.arg[0].is_immediate ?
-        word.arg[0].immediate :
-        static_cast<uint64_t>(symbol_to_addr[word.arg[0].symbol_id]);
-      uint64_t b = word.arg[1].is_immediate ?
-        word.arg[1].immediate :
-        static_cast<uint64_t>(symbol_to_addr[word.arg[1].symbol_id]);
-      uint64_t c = word.arg[2].is_immediate ?
-        word.arg[2].immediate :
-        static_cast<uint64_t>(symbol_to_addr[word.arg[2].symbol_id]);
-      uint64_t instruction = ((c & RAM_MASK) << 42) | ((b & RAM_MASK) << 21) | (a & RAM_MASK);
-      out.write((const char*)&instruction, sizeof(instruction));
-    } else {
-      uint64_t data = word.arg[0].is_immediate ?
-        word.arg[0].immediate :
-        static_cast<uint64_t>(symbol_to_addr[word.arg[0].symbol_id]);
-      out.write((const char*)&data, sizeof(data));
-    }
+  for (size_t idx = 0; idx < code.size(); ++idx) {
+    const auto& word = code[idx];
+    uint64_t data = word.is_immediate ?
+      word.immediate :
+      static_cast<uint64_t>(symbol_to_addr[word.symbol_id]);
+    out.write((const char*)&data, sizeof(data));
   }
 }
 
