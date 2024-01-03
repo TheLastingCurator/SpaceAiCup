@@ -4,7 +4,9 @@
 #include <string_view>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include <sstream>
 
 struct Word {
   int64_t source_line;
@@ -13,9 +15,30 @@ struct Word {
   int64_t symbol_id = -1;
 };
 
-std::unordered_map<std::string, int64_t> symbol_map;
+struct MacroLine {
+  std::string text;
+  int64_t source_line;
+
+  MacroLine(std::string_view &line, int64_t line_number)
+      : text(line)
+      , source_line(line_number) {
+  }
+};
+
+struct Macro {
+  std::vector<std::string> args;
+  std::vector<MacroLine> lines;
+  std::unordered_set<std::string> locals;
+};
+
+std::unordered_map<std::string, int64_t> symbol_map; // zero or positive = symbol, negative = macro
 std::vector<int64_t> symbol_to_addr;
 std::vector<Word> code;
+std::vector<Macro> macros;
+Macro* macro_being_parsed = nullptr;
+int64_t next_macro_substitution_idx = 0;
+
+bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<std::string, Word> &substitutions, bool is_macro); 
 
 bool isDigit(char ch) {
   return ch >= '0' && ch <= '9';
@@ -58,7 +81,11 @@ bool consumeComment(std::string_view& text) {
   return true;
 }
 
-int64_t SymbolToId(const std::string& str) {
+int64_t SymbolToId(const std::string& str, std::unordered_map<std::string, Word> &substitutions) {
+  auto itSub = substitutions.find(str);
+  if (itSub != substitutions.end()) {
+    return itSub->second.symbol_id;
+  }
   auto it = symbol_map.find(str);
   if (it == symbol_map.end()) {
     int64_t id = static_cast<int64_t>(symbol_to_addr.size());
@@ -101,8 +128,11 @@ bool tryParseIdentifier(std::string_view& text, std::string& outIdentifier) {
   std::string_view originalText = text;
   consumeWhitespace(text);
   size_t i = 0;
-  while (i < text.size() && isAlnum(text[i])) {
+  if (i < text.size() && isAlpha(text[i])) {
     ++i;
+    while (i < text.size() && isAlnum(text[i])) {
+      ++i;
+    }
   }
   if (i == 0) {
     text = originalText;
@@ -113,7 +143,7 @@ bool tryParseIdentifier(std::string_view& text, std::string& outIdentifier) {
   return true;
 }
 
-bool parseArg(std::string_view& text, Word& word, int64_t line_number) {
+bool tryParseArg(std::string_view& text, Word& word, int64_t line_number, std::unordered_map<std::string, Word> &substitutions) {
   word.source_line = line_number;
   uint64_t number;
   std::string identifier;
@@ -123,22 +153,28 @@ bool parseArg(std::string_view& text, Word& word, int64_t line_number) {
     return true;
   } else if (tryParseIdentifier(text, identifier)) {
     word.is_immediate = false;
-    word.symbol_id = SymbolToId(identifier);
+    word.symbol_id = SymbolToId(identifier, substitutions);
     return true;
   } else {
-    std::cerr << "Error: Expected argument at line " << line_number << std::endl;
     return false;
   }
 }
 
+bool parseArg(std::string_view& text, Word& word, int64_t line_number, std::unordered_map<std::string, Word> &substitutions) {
+  if (tryParseArg(text, word, line_number, substitutions)) {
+    return true;
+  }
+  std::cerr << "Error: Expected argument at line " << line_number << std::endl;
+  return false;
+}
 
-bool parseSubleqInstruction(std::string_view& text, int64_t line_number) {
+bool parseSubleqInstruction(std::string_view& text, int64_t line_number, std::unordered_map<std::string, Word> &substitutions) {
   Word word[3];
-  bool is_ok = parseArg(text, word[0], line_number);
+  bool is_ok = parseArg(text, word[0], line_number, substitutions);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word[1], line_number);
+  is_ok = is_ok && parseArg(text, word[1], line_number, substitutions);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word[2], line_number);
+  is_ok = is_ok && parseArg(text, word[2], line_number, substitutions);
   if (is_ok) {
     code.push_back(word[0]);
     code.push_back(word[1]);
@@ -149,11 +185,11 @@ bool parseSubleqInstruction(std::string_view& text, int64_t line_number) {
   return is_ok;
 }
 
-bool parseSubInstruction(std::string_view& text, int64_t line_number) {
+bool parseSubInstruction(std::string_view& text, int64_t line_number, std::unordered_map<std::string, Word> &substitutions) {
   Word word[3];
-  bool is_ok = parseArg(text, word[0], line_number);
+  bool is_ok = parseArg(text, word[0], line_number, substitutions);
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word[1], line_number);
+  is_ok = is_ok && parseArg(text, word[1], line_number, substitutions);
   word[2].source_line = line_number;
   word[2].is_immediate = true;
   word[2].immediate = code.size()*64 + 3;
@@ -183,7 +219,7 @@ bool tryParseLabel(std::string_view& text, std::string& outLabel) {
   return false;
 }
 
-bool parseDW(std::string_view& text, int64_t line_number) {
+bool parseDW(std::string_view& text, int64_t line_number, std::unordered_map<std::string, Word> &substitutions) {
   consumeWhitespace(text);
   consumeComment(text);
   while (!text.empty()) {
@@ -218,7 +254,7 @@ bool parseDW(std::string_view& text, int64_t line_number) {
         code.push_back(word);
       } else if (tryParseIdentifier(text, identifier)) {
         word.is_immediate = false;
-        word.symbol_id = SymbolToId(identifier);
+        word.symbol_id = SymbolToId(identifier, substitutions);
         code.push_back(word);
       } else {
         std::cerr << "Error: Invalid word value at line " << line_number << '\n';
@@ -259,46 +295,200 @@ bool parseORG(std::string_view& text, int64_t line_number) {
   return true;
 }
 
-bool startsWith(const std::string_view& text, const std::string_view& prefix) {
+bool startsWithToken(const std::string_view& text, const std::string_view& prefix) {
     if (prefix.size() > text.size()) return false;
     for (size_t i = 0; i < prefix.size(); ++i) {
         if (text[i] != prefix[i]) return false;
     }
+    if (prefix.size() == text.size()) {
+      return true;
+    }
+    if (isAlnum(text[prefix.size()])) {
+      return false;
+    }
     return true;
 }
 
-bool parseLine(std::string_view line, int64_t line_number) {
+bool parseMacro(std::string_view& text, int64_t line_number) {
+  std::string_view originalText = text;
+  std::string identifier;
+  if (tryParseIdentifier(text, identifier)) {
+    if (macro_being_parsed != nullptr) {
+      std::cerr << "Error: MACRO definition inside another MACRO definition, line " << line_number << '\n';
+      return false;
+    }
+    macros.emplace_back();
+    macro_being_parsed = &macros.back();
+    auto it = symbol_map.find(identifier);
+    if (it != symbol_map.end()) {
+      std::cerr << "Error: MACRO name " << text << " is already in use, line " << line_number << '\n';
+      return false;
+    }
+    symbol_map[identifier] = -macros.size();
+
+    if (!consumeWhitespace(text) || text.empty()) {
+      // parameterless macro
+      return true;
+    } else {
+      // macro with parameters
+      std::string param;
+      while (tryParseIdentifier(text, param)) {
+        macro_being_parsed->args.push_back(param);
+        consumeWhitespace(text);
+        consumeComa(text);
+        consumeWhitespace(text);
+      }
+      return true;
+    }
+  }
+  text = originalText;
+  return false;
+}
+
+
+
+bool substituteMacro(std::string_view& text, int64_t line_number, std::string& name, std::unordered_map<std::string, Word> &in_substitutions) {
+  int64_t substitution_idx = next_macro_substitution_idx;
+  ++next_macro_substitution_idx;
+  int64_t id = SymbolToId(name, in_substitutions);
+  if (id >= 0) {
+    std::cerr << "Error: Undefined macro call at line " << line_number << '\n';
+    return false;
+  }
+  int64_t macro_id = -1 - id;
+  Macro &macro = macros[macro_id];
+  std::vector<Word> args;
+  if (!consumeWhitespace(text) || text.empty()) {
+    // parameterless macro
+  } else {
+    // macro with parameters
+    Word word;
+    while (tryParseArg(text, word, line_number, in_substitutions)) {
+      args.push_back(word);
+      consumeWhitespace(text);
+      consumeComa(text);
+      consumeWhitespace(text);
+    }
+  }
+  if (args.size() != macro.args.size()) {
+    std::cerr << "Error: Macro " << name << " requires " << macro.args.size() << " arguments, provided " << args.size() << " at line " << line_number << '\n';
+    return false;
+  }
+  std::unordered_map<std::string, Word> substitutions;
+  for (size_t i = 0; i < args.size(); ++i) {
+    auto itSub = substitutions.find(macro.args[i]); 
+    if (itSub != substitutions.end()) {
+      std::cerr << "Error: Macro " << name << " argument " << macro.args[i] << " redefinition at line " << line_number << '\n';
+      return false;
+    }
+    substitutions[macro.args[i]] = args[i];
+  }
+  for (auto it = macro.locals.begin(); it != macro.locals.end(); ++it) {
+    std::stringstream str;
+    str << *it << "~" << substitution_idx;
+    std::string global = str.str();
+    int64_t id = SymbolToId(global, substitutions);
+    Word word;
+    word.source_line = line_number;
+    word.is_immediate = false;
+    word.symbol_id = id;
+    auto itSub = substitutions.find(*it); 
+    if (itSub != substitutions.end()) {
+      std::cerr << "Error: Macro " << name << " local " << *it << " redefinition at line " << line_number << '\n';
+      return false;
+    }
+    substitutions[*it] = word;
+  }
+
+  for (size_t i = 0; i < macro.lines.size(); ++i) {
+    MacroLine &macro_line = macro.lines[i];
+    std::string_view v = macro_line.text;
+    if (!parseLine(v, macro_line.source_line, substitutions, true)) {
+      std::cerr << "Error: Could not parse line " << macro_line.source_line << std::endl;
+      std::cerr << "Error: Could not substitute macro at line" << line_number << std::endl;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+bool parseMacroLine(std::string_view line, int64_t line_number) {
+  macro_being_parsed->lines.emplace_back(line, line_number);
   consumeWhitespace(line);
   std::string label;
   if (tryParseLabel(line, label)) {
-    symbol_to_addr[SymbolToId(label)] = static_cast<int64_t>(code.size())*64;
+    macro_being_parsed->locals.insert(label);
   }
   consumeWhitespace(line);
-  if (startsWith(line, "SUBLEQ")) {
+  if (startsWithToken(line, "MACRO")) {
+    std::cerr << "Error: MACRO definition inside another MACRO definition, line " << line_number << '\n';
+    return false;
+  }
+  if (startsWithToken(line, "ENDM")) {
+    line.remove_prefix(4);
+    consumeWhitespace(line);
+    macro_being_parsed = nullptr;
+    consumeComment(line);
+    if (line.size() > 0) {
+      std::cerr << "Error: Unexpected tokens at line " << line_number << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<std::string, Word> &substitutions, bool is_macro) {
+  consumeWhitespace(line);
+  std::string label;
+  if (tryParseLabel(line, label)) {
+    symbol_to_addr[SymbolToId(label, substitutions)] = static_cast<int64_t>(code.size())*64;
+  }
+  consumeWhitespace(line);
+  std::string name;
+  if (startsWithToken(line, "SUBLEQ")) {
     line.remove_prefix(6);
     consumeWhitespace(line);
-    if (!parseSubleqInstruction(line, line_number)) {
+    if (!parseSubleqInstruction(line, line_number, substitutions)) {
       return false;
     }
-  } else if (startsWith(line, "SUB")) {
+  } else if (startsWithToken(line, "SUB")) {
     line.remove_prefix(3);
     consumeWhitespace(line);
-    if (!parseSubInstruction(line, line_number)) {
+    if (!parseSubInstruction(line, line_number, substitutions)) {
       return false;
     }
-  } else if (startsWith(line, "DW")) {
+  } else if (startsWithToken(line, "DW")) {
     line.remove_prefix(2);
     consumeWhitespace(line);
-    if (!parseDW(line, line_number)) {
+    if (!parseDW(line, line_number, substitutions)) {
       return false;
     }
-  } else if (startsWith(line, "ORG")) {
+  } else if (startsWithToken(line, "ORG")) {
     line.remove_prefix(3);
     consumeWhitespace(line);
     if (!parseORG(line, line_number)) {
       return false;
     }
+  } else if (startsWithToken(line, "MACRO")) {
+    line.remove_prefix(5);
+    consumeWhitespace(line);
+    if (!parseMacro(line, line_number)) {
+      return false;
+    }
+  } else if (startsWithToken(line, "ENDM")) {
+    line.remove_prefix(4);
+    consumeWhitespace(line);
+    if (!is_macro) {
+      return false;
+    }
+  } else if (tryParseIdentifier(line, name)) {
+    if (!substituteMacro(line, line_number, name, substitutions)) {
+      return false;
+    }
   }
+    
   consumeWhitespace(line);
   consumeComment(line);
   if (line.size() > 0) {
@@ -355,9 +545,17 @@ int main(int argc, char* argv[]) {
     std::transform(line.begin(), line.end(), line.begin(),
         [](char c){ return ((c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c); });
     std::string_view v = line;
-    if (!parseLine(v, line_number)) {
-      std::cerr << "Error: Could not parse line " << line_number << std::endl;
-      return 1;
+    std::unordered_map<std::string, Word> substitutions;
+    if (!macro_being_parsed) {
+      if (!parseLine(v, line_number, substitutions, false)) {
+        std::cerr << "Error: Could not parse line " << line_number << std::endl;
+        return 1;
+      }
+    } else {
+      if (!parseMacroLine(v, line_number)) {
+        std::cerr << "Error: Could not parse macro line " << line_number << std::endl;
+        return 1;
+      }
     }
   }
 
