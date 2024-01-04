@@ -1,4 +1,8 @@
 ; a test program
+macro sub v1 v2
+subleq v1 v2 next
+next: endm
+
 macro jmp label
 subleq zero, zero, label
 endm
@@ -27,6 +31,6 @@ zero: dw 0
 neg_tmp: dw zero
 dw 'hello world',0
 
-;org 1920
+org 1920
 begin: jmp begin ;endless loop
  

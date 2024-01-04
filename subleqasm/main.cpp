@@ -329,7 +329,12 @@ bool parseMacro(std::string_view& text, int64_t line_number) {
     } else {
       // macro with parameters
       std::string param;
+      std::unordered_set<std::string> arg_set;
       while (tryParseIdentifier(text, param)) {
+        if (!arg_set.insert(param).second) {
+          std::cerr << "Error: MACRO parameter name " << param << " use more than once, line " << line_number << std::endl;
+          return false;
+        }
         macro_being_parsed->args.push_back(param);
         consumeWhitespace(text);
         consumeComa(text);
@@ -402,7 +407,7 @@ bool substituteMacro(std::string_view& text, int64_t line_number, std::string& n
     std::string_view v = macro_line.text;
     if (!parseLine(v, macro_line.source_line, substitutions, true)) {
       std::cerr << "Error: Could not parse line " << macro_line.source_line << std::endl;
-      std::cerr << "Error: Could not substitute macro at line" << line_number << std::endl;
+      std::cerr << "Error: Could not substitute macro at line " << line_number << std::endl;
       return false;
     }
   }
