@@ -92,9 +92,10 @@ bool consumeComment(std::string_view& text) {
   return true;
 }
 
-int64_t SymbolToId(const std::string& str, std::unordered_map<std::string, Word> &substitutions) {
+int64_t SymbolToId(const std::string& str, std::unordered_map<std::string, Word> &substitutions, int64_t& in_out_immed) {
   auto itSub = substitutions.find(str);
   if (itSub != substitutions.end()) {
+    in_out_immed += itSub->second.immediate;
     return itSub->second.symbol_id;
   }
   auto it = symbol_map.find(str);
@@ -106,6 +107,39 @@ int64_t SymbolToId(const std::string& str, std::unordered_map<std::string, Word>
   }
   return it->second;
 }
+
+bool tryParseOffset(std::string_view& text, int64_t& inOutValue) {
+  if (text.empty()) {
+    return false;
+  }
+  bool isNegative = false;
+  if (text[0] == '-') {
+    isNegative = true;
+  } else if (text[0] != '+') {
+    return false;
+  }
+  std::string_view originalText = text;
+  text.remove_prefix(1);
+  size_t i = 0;
+  uint64_t result = 0;
+  while (i < text.size() && isDigit(text[i])) {
+    uint64_t digit = text[i] - '0';
+    if (result > (std::numeric_limits<uint64_t>::max() - digit) / 10) {
+      text = originalText;
+      return false;
+    }
+    result = result * 10 + digit;
+    ++i;
+  }
+  if (i == 0) {
+    text = originalText;
+    return false;
+  }
+  text.remove_prefix(i);
+  inOutValue += isNegative ? (~result + 1) : result;
+  return true;
+}
+
 
 bool tryParseInteger(std::string_view& text, uint64_t& outValue) {
   std::string_view originalText = text;
@@ -164,7 +198,8 @@ bool tryParseArg(std::string_view& text, Word& word, int64_t line_number, std::u
     return true;
   } else if (tryParseIdentifier(text, identifier)) {
     word.is_immediate = false;
-    word.symbol_id = SymbolToId(identifier, substitutions);
+    word.symbol_id = SymbolToId(identifier, substitutions, word.immediate);
+    tryParseOffset(text, word.immediate);
     return true;
   } else {
     return false;
@@ -247,7 +282,8 @@ bool parseDW(std::string_view& text, int64_t line_number, std::unordered_map<std
         PushCode(word, 52);
       } else if (tryParseIdentifier(text, identifier)) {
         word.is_immediate = false;
-        word.symbol_id = SymbolToId(identifier, substitutions);
+        word.symbol_id = SymbolToId(identifier, substitutions, word.immediate);
+        tryParseOffset(text, word.immediate);
         PushCode(word, 52);
       } else {
         std::cerr << "Error: Invalid word value at line " << line_number << std::endl;
@@ -352,7 +388,8 @@ bool parseMacro(std::string_view& text, int64_t line_number) {
 bool substituteMacro(std::string_view& text, int64_t line_number, std::string& name, std::unordered_map<std::string, Word> &in_substitutions) {
   int64_t substitution_idx = next_macro_substitution_idx;
   ++next_macro_substitution_idx;
-  int64_t id = SymbolToId(name, in_substitutions);
+  int64_t tmp = 0;
+  int64_t id = SymbolToId(name, in_substitutions, tmp);
   if (id >= 0) {
     std::cerr << "Error: Undefined macro call at line " << line_number << std::endl;
     return false;
@@ -364,8 +401,11 @@ bool substituteMacro(std::string_view& text, int64_t line_number, std::string& n
     // parameterless macro
   } else {
     // macro with parameters
-    Word word;
-    while (tryParseArg(text, word, line_number, in_substitutions)) {
+    while (true) {
+      Word word;
+      if (!tryParseArg(text, word, line_number, in_substitutions)) {
+        break;
+      }
       args.push_back(word);
       consumeWhitespace(text);
       consumeComa(text);
@@ -389,8 +429,8 @@ bool substituteMacro(std::string_view& text, int64_t line_number, std::string& n
     std::stringstream str;
     str << *it << "~" << substitution_idx;
     std::string global = str.str();
-    int64_t id = SymbolToId(global, substitutions);
     Word word;
+    int64_t id = SymbolToId(global, substitutions, word.immediate);
     word.source_line = line_number;
     word.is_immediate = false;
     word.symbol_id = id;
@@ -445,7 +485,8 @@ bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<st
   consumeWhitespace(line);
   std::string label;
   if (tryParseLabel(line, label)) {
-    symbol_to_addr[SymbolToId(label, substitutions)] = code_size_bits;
+    int64_t tmp = 0;
+    symbol_to_addr[SymbolToId(label, substitutions, tmp)] = code_size_bits;
   }
   consumeWhitespace(line);
   std::string name;
@@ -550,7 +591,7 @@ void EmitBinaryCode(BitwiseOutput &out) {
     const auto& word = code[idx];
     uint64_t data = word.is_immediate ?
       word.immediate :
-      static_cast<uint64_t>(symbol_to_addr[word.symbol_id]);
+      (static_cast<uint64_t>(symbol_to_addr[word.symbol_id]) + word.immediate);
     out.write(data, word.size_bits);
   }
 }

@@ -20,8 +20,8 @@ sub neg_tmp, label
 mov label, neg_tmp
 endm
 
-subleq ax ax next
-mov ax ax
+subleq ax-1 ax+18 next
+mov ax ax+1
 next:
 subleq begin zero zero 
 subleq -100300 1 2
