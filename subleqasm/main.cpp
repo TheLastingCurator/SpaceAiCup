@@ -13,6 +13,8 @@ struct Word {
   bool is_immediate = false;
   int64_t immediate = 0;
   int64_t symbol_id = -1;
+  int64_t offset_bits = 0;
+  int64_t size_bits = 52;
 };
 
 struct MacroLine {
@@ -34,11 +36,20 @@ struct Macro {
 std::unordered_map<std::string, int64_t> symbol_map; // zero or positive = symbol, negative = macro
 std::vector<int64_t> symbol_to_addr;
 std::vector<Word> code;
+int64_t code_size_bits = 0;
 std::vector<Macro> macros;
 Macro* macro_being_parsed = nullptr;
 int64_t next_macro_substitution_idx = 0;
 
 bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<std::string, Word> &substitutions, bool is_macro); 
+
+
+void PushCode(Word &word, int64_t size_bits) {
+  code.push_back(word);
+  code.back().offset_bits = code_size_bits;
+  code.back().size_bits = size_bits;
+  code_size_bits += size_bits;
+}
 
 bool isDigit(char ch) {
   return ch >= '0' && ch <= '9';
@@ -176,9 +187,9 @@ bool parseSubleqInstruction(std::string_view& text, int64_t line_number, std::un
   is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
   is_ok = is_ok && parseArg(text, word[2], line_number, substitutions);
   if (is_ok) {
-    code.push_back(word[0]);
-    code.push_back(word[1]);
-    code.push_back(word[2]);
+    PushCode(word[0], 26);
+    PushCode(word[1], 26);
+    PushCode(word[2], 26);
   } else {
     std::cerr << "Error: Can't parse instruction arguments at line " << line_number << std::endl;
   }
@@ -192,11 +203,11 @@ bool parseSubInstruction(std::string_view& text, int64_t line_number, std::unord
   is_ok = is_ok && parseArg(text, word[1], line_number, substitutions);
   word[2].source_line = line_number;
   word[2].is_immediate = true;
-  word[2].immediate = code.size()*64 + 3;
+  word[2].immediate = code_size_bits + 3 * 26;
   if (is_ok) {
-    code.push_back(word[0]);
-    code.push_back(word[1]);
-    code.push_back(word[2]);
+    PushCode(word[0], 26);
+    PushCode(word[1], 26);
+    PushCode(word[2], 26);
   } else {
     std::cerr << "Error: Can't parse instruction arguments at line " << line_number << std::endl;
   }
@@ -228,18 +239,18 @@ bool parseDW(std::string_view& text, int64_t line_number, std::unordered_map<std
       text.remove_prefix(1);
       while (!text.empty() && text.front() != delimiter) {
         if (text.front() == '\n' || text.front() == '\0') {
-          std::cerr << "Error: Unterminated string literal at line " << line_number << '\n';
+          std::cerr << "Error: Unterminated string literal at line " << line_number << std::endl;
           return false;
         }
         Word word;
         word.source_line = line_number;
         word.is_immediate = true;
         word.immediate = static_cast<uint64_t>(text.front());
-        code.push_back(word);
+        PushCode(word, 52);
         text.remove_prefix(1);
       }
       if (text.empty() || text.front() != delimiter) {
-        std::cerr << "Error: Expected closing delimiter at line " << line_number << '\n';
+        std::cerr << "Error: Expected closing delimiter at line " << line_number << std::endl;
         return false;
       }
       text.remove_prefix(1);
@@ -251,13 +262,13 @@ bool parseDW(std::string_view& text, int64_t line_number, std::unordered_map<std
       if (tryParseInteger(text, value)) {
         word.is_immediate = true;
         word.immediate = value;
-        code.push_back(word);
+        PushCode(word, 52);
       } else if (tryParseIdentifier(text, identifier)) {
         word.is_immediate = false;
         word.symbol_id = SymbolToId(identifier, substitutions);
-        code.push_back(word);
+        PushCode(word, 52);
       } else {
-        std::cerr << "Error: Invalid word value at line " << line_number << '\n';
+        std::cerr << "Error: Invalid word value at line " << line_number << std::endl;
         return false;
       }
     }
@@ -274,23 +285,27 @@ bool parseORG(std::string_view& text, int64_t line_number) {
   consumeWhitespace(text);
   uint64_t address;
   if (!tryParseInteger(text, address)) {
-    std::cerr << "Error: Unable to parse address in ORG directive at line " << line_number << '\n';
+    std::cerr << "Error: Unable to parse address in ORG directive at line " << line_number << std::endl;
     return false;
   }
-  if (address < code.size() * 64) {
-    std::cerr << "Error: ORG address (" << address << ") is less than current code size (" << code.size()*64 << ") at line " << line_number << '\n';
+  if (address < code_size_bits) {
+    std::cerr << "Error: ORG address (" << address << ") is less than current code size (" << code_size_bits << ") at line " << line_number << std::endl;
     return false;
   }
-  if (address % 64) {
-    std::cerr << "Error: ORG address (" << address << ") is not a multipe of 64 at line " << line_number << '\n';
+  /*if (address % 64) {
+    std::cerr << "Error: ORG address (" << address << ") is not a multipe of 64 at line " << line_number << std::endl;
     return false;
-  }
+  }*/
   Word word;
   word.source_line = line_number;
   word.is_immediate = true;
   word.immediate = 0;
-  while (code.size()*64 < address) {
-    code.push_back(word);
+  while (code_size_bits < address) {
+    if (address - code_size_bits >= 52) {
+      PushCode(word, 52);
+    } else {
+      PushCode(word, address - code_size_bits);
+    }
   }
   return true;
 }
@@ -314,14 +329,14 @@ bool parseMacro(std::string_view& text, int64_t line_number) {
   std::string identifier;
   if (tryParseIdentifier(text, identifier)) {
     if (macro_being_parsed != nullptr) {
-      std::cerr << "Error: MACRO definition inside another MACRO definition, line " << line_number << '\n';
+      std::cerr << "Error: MACRO definition inside another MACRO definition, line " << line_number << std::endl;
       return false;
     }
     macros.emplace_back();
     macro_being_parsed = &macros.back();
     auto it = symbol_map.find(identifier);
     if (it != symbol_map.end()) {
-      std::cerr << "Error: MACRO name " << text << " is already in use, line " << line_number << '\n';
+      std::cerr << "Error: MACRO name " << text << " is already in use, line " << line_number << std::endl;
       return false;
     }
     symbol_map[identifier] = -macros.size();
@@ -352,7 +367,7 @@ bool substituteMacro(std::string_view& text, int64_t line_number, std::string& n
   ++next_macro_substitution_idx;
   int64_t id = SymbolToId(name, in_substitutions);
   if (id >= 0) {
-    std::cerr << "Error: Undefined macro call at line " << line_number << '\n';
+    std::cerr << "Error: Undefined macro call at line " << line_number << std::endl;
     return false;
   }
   int64_t macro_id = -1 - id;
@@ -371,14 +386,14 @@ bool substituteMacro(std::string_view& text, int64_t line_number, std::string& n
     }
   }
   if (args.size() != macro.args.size()) {
-    std::cerr << "Error: Macro " << name << " requires " << macro.args.size() << " arguments, provided " << args.size() << " at line " << line_number << '\n';
+    std::cerr << "Error: Macro " << name << " requires " << macro.args.size() << " arguments, provided " << args.size() << " at line " << line_number << std::endl;
     return false;
   }
   std::unordered_map<std::string, Word> substitutions;
   for (size_t i = 0; i < args.size(); ++i) {
     auto itSub = substitutions.find(macro.args[i]); 
     if (itSub != substitutions.end()) {
-      std::cerr << "Error: Macro " << name << " argument " << macro.args[i] << " redefinition at line " << line_number << '\n';
+      std::cerr << "Error: Macro " << name << " argument " << macro.args[i] << " redefinition at line " << line_number << std::endl;
       return false;
     }
     substitutions[macro.args[i]] = args[i];
@@ -394,7 +409,7 @@ bool substituteMacro(std::string_view& text, int64_t line_number, std::string& n
     word.symbol_id = id;
     auto itSub = substitutions.find(*it); 
     if (itSub != substitutions.end()) {
-      std::cerr << "Error: Macro " << name << " local " << *it << " redefinition at line " << line_number << '\n';
+      std::cerr << "Error: Macro " << name << " local " << *it << " redefinition at line " << line_number << std::endl;
       return false;
     }
     substitutions[*it] = word;
@@ -423,7 +438,7 @@ bool parseMacroLine(std::string_view line, int64_t line_number) {
   }
   consumeWhitespace(line);
   if (startsWithToken(line, "MACRO")) {
-    std::cerr << "Error: MACRO definition inside another MACRO definition, line " << line_number << '\n';
+    std::cerr << "Error: MACRO definition inside another MACRO definition, line " << line_number << std::endl;
     return false;
   }
   if (startsWithToken(line, "ENDM")) {
@@ -443,7 +458,7 @@ bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<st
   consumeWhitespace(line);
   std::string label;
   if (tryParseLabel(line, label)) {
-    symbol_to_addr[SymbolToId(label, substitutions)] = static_cast<int64_t>(code.size())*64;
+    symbol_to_addr[SymbolToId(label, substitutions)] = code_size_bits;
   }
   consumeWhitespace(line);
   std::string name;
@@ -499,11 +514,11 @@ bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<st
 }
 
 bool CheckAddr() {
-  for (size_t address = 0; address < code.size(); ++address) {
-    const auto& word = code[address];
+  for (size_t idx = 0; idx < code.size(); ++idx) {
+    const auto& word = code[idx];
     if (!word.is_immediate) {
       if (symbol_to_addr[word.symbol_id] < 0) {
-        std::cerr << "Error: Undefined symbol at line " << word.source_line << '\n';
+        std::cerr << "Error: Undefined symbol at line " << word.source_line << std::endl;
         return false;
       }
     }
@@ -511,13 +526,51 @@ bool CheckAddr() {
   return true;
 }
 
-void EmitBinaryCode(std::ofstream &out) {
+class BitwiseOutput {
+	public:
+		explicit BitwiseOutput(std::ofstream &outputStream)
+			: out(outputStream), buffer(0), bufferBits(0) {}
+
+		~BitwiseOutput() {
+			flushBuffer();
+		}
+
+		void write(uint64_t value, size_t bitCount) {
+			while (bitCount > 0) {
+				size_t bitsToWrite = std::min(bitCount, 8 - bufferBits);
+				uint64_t shiftedValue = value >> (bitCount - bitsToWrite);
+				buffer |= (shiftedValue & ((1ULL << bitsToWrite) - 1)) << (8 - bufferBits - bitsToWrite);
+				bufferBits += bitsToWrite;
+				bitCount -= bitsToWrite;
+
+				if (bufferBits == 8) {
+					flushBuffer();
+				}
+			}
+		}
+
+		void flushBuffer() {
+			if (bufferBits > 0) {
+        uint8_t byte = buffer;
+				out.write((char*)&byte, 1);
+				buffer = 0;
+				bufferBits = 0;
+			}
+		}
+
+	private:
+		std::ofstream &out;
+		uint64_t buffer;
+		size_t bufferBits;
+};
+
+void EmitBinaryCode(BitwiseOutput &out) {
   for (size_t idx = 0; idx < code.size(); ++idx) {
     const auto& word = code[idx];
     uint64_t data = word.is_immediate ?
       word.immediate :
       static_cast<uint64_t>(symbol_to_addr[word.symbol_id]);
-    out.write((const char*)&data, sizeof(data));
+    out.write(data, word.size_bits);
   }
 }
 
@@ -563,6 +616,8 @@ int main(int argc, char* argv[]) {
     std::cerr << "Error: Could not emit binary code" << std::endl;
     return 1;
   }
-  EmitBinaryCode(out);
+	BitwiseOutput bitwiseOut(out);
+  EmitBinaryCode(bitwiseOut);
+  bitwiseOut.flushBuffer();
   return 0;
 }
