@@ -196,24 +196,6 @@ bool parseSubleqInstruction(std::string_view& text, int64_t line_number, std::un
   return is_ok;
 }
 
-bool parseSubInstruction(std::string_view& text, int64_t line_number, std::unordered_map<std::string, Word> &substitutions) {
-  Word word[3];
-  bool is_ok = parseArg(text, word[0], line_number, substitutions);
-  is_ok = is_ok && (consumeWhitespace(text) | consumeComa(text) | consumeWhitespace(text));
-  is_ok = is_ok && parseArg(text, word[1], line_number, substitutions);
-  word[2].source_line = line_number;
-  word[2].is_immediate = true;
-  word[2].immediate = code_size_bits + 3 * 26;
-  if (is_ok) {
-    PushCode(word[0], 26);
-    PushCode(word[1], 26);
-    PushCode(word[2], 26);
-  } else {
-    std::cerr << "Error: Can't parse instruction arguments at line " << line_number << std::endl;
-  }
-  return is_ok;
-}
-
 bool tryParseLabel(std::string_view& text, std::string& outLabel) {
   std::string_view originalText = text;
   std::string identifier;
@@ -466,12 +448,6 @@ bool parseLine(std::string_view line, int64_t line_number, std::unordered_map<st
     line.remove_prefix(6);
     consumeWhitespace(line);
     if (!parseSubleqInstruction(line, line_number, substitutions)) {
-      return false;
-    }
-  } else if (startsWithToken(line, "SUB")) {
-    line.remove_prefix(3);
-    consumeWhitespace(line);
-    if (!parseSubInstruction(line, line_number, substitutions)) {
       return false;
     }
   } else if (startsWithToken(line, "DW")) {
