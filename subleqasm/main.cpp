@@ -558,13 +558,14 @@ class BitwiseOutput {
 		}
 
 		void write(uint64_t value, size_t bitCount) {
+      size_t bits_written = 0;
 			while (bitCount > 0) {
 				size_t bitsToWrite = std::min(bitCount, 8 - bufferBits);
-				uint64_t shiftedValue = value >> (bitCount - bitsToWrite);
-				buffer |= (shiftedValue & ((1ULL << bitsToWrite) - 1)) << (8 - bufferBits - bitsToWrite);
+				uint64_t shiftedValue = value >> bits_written;
+				buffer |= ((shiftedValue & ((1ULL << bitsToWrite) - 1)) << bufferBits);
 				bufferBits += bitsToWrite;
 				bitCount -= bitsToWrite;
-
+        bits_written += bitsToWrite;
 				if (bufferBits == 8) {
 					flushBuffer();
 				}
@@ -573,8 +574,7 @@ class BitwiseOutput {
 
 		void flushBuffer() {
 			if (bufferBits > 0) {
-        uint8_t byte = buffer;
-				out.write((char*)&byte, 1);
+				out.write((char*)&buffer, 1);
 				buffer = 0;
 				bufferBits = 0;
 			}
@@ -582,7 +582,7 @@ class BitwiseOutput {
 
 	private:
 		std::ofstream &out;
-		uint64_t buffer;
+		uint8_t buffer;
 		size_t bufferBits;
 };
 
